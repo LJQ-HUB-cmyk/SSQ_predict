@@ -1,0 +1,161 @@
+{
+  "timestamp": "2025-11-05 10:25:33",
+  "page": 2,
+  "request_data": {
+    "reqType": "list",
+    "reqVal": "page=2"
+  },
+  "status_code": 200,
+  "headers": {
+    "Date": "Wed, 05 Nov 2025 02:25:33 GMT",
+    "Content-Type": "application/json",
+    "Transfer-Encoding": "chunked",
+    "Connection": "keep-alive",
+    "Vary": "Accept-Encoding, Accept-Encoding",
+    "X-Source": "C/200",
+    "X-Frame-Options": "SAMEORIGIN",
+    "X-Request-Id": "9e296f70a7e203808cd248b06d102d0d",
+    "Via": "S.mix-js-xiq2-211, V.mix-js-xiq2-211, T.205.-, M.cmn-js-xiq1-205",
+    "Access-Control-Allow-Origin": "*",
+    "Content-Encoding": "gzip",
+    "X-Via-JSL": "234f44c,-",
+    "X-Cache": "bypass"
+  },
+  "response": {
+    "page": 1,
+    "page_size": 10,
+    "list": [
+      {
+        "qishu": "2025117",
+        "result": [
+          "06",
+          "08",
+          "17",
+          "20",
+          "25",
+          "33",
+          "10"
+        ],
+        "date": "2025-10-12"
+      },
+      {
+        "qishu": "2025116",
+        "result": [
+          "02",
+          "04",
+          "08",
+          "24",
+          "28",
+          "31",
+          "09"
+        ],
+        "date": "2025-10-09"
+      },
+      {
+        "qishu": "2025115",
+        "result": [
+          "02",
+          "03",
+          "08",
+          "19",
+          "24",
+          "30",
+          "02"
+        ],
+        "date": "2025-10-07"
+      },
+      {
+        "qishu": "2025114",
+        "result": [
+          "01",
+          "20",
+          "21",
+          "25",
+          "26",
+          "27",
+          "10"
+        ],
+        "date": "2025-10-05"
+      },
+      {
+        "qishu": "2025113",
+        "result": [
+          "08",
+          "10",
+          "13",
+          "15",
+          "24",
+          "31",
+          "16"
+        ],
+        "date": "2025-09-30"
+      },
+      {
+        "qishu": "2025112",
+        "result": [
+          "03",
+          "09",
+          "11",
+          "13",
+          "20",
+          "32",
+          "02"
+        ],
+        "date": "2025-09-28"
+      },
+      {
+        "qishu": "2025111",
+        "result": [
+          "09",
+          "14",
+          "18",
+          "28",
+          "31",
+          "33",
+          "12"
+        ],
+        "date": "2025-09-25"
+      },
+      {
+        "qishu": "2025110",
+        "result": [
+          "01",
+          "05",
+          "11",
+          "14",
+          "16",
+          "19",
+          "08"
+        ],
+        "date": "2025-09-23"
+      },
+      {
+        "qishu": "2025109",
+        "result": [
+          "05",
+          "06",
+          "09",
+          "17",
+          "18",
+          "31",
+          "03"
+        ],
+        "date": "2025-09-21"
+      },
+      {
+        "qishu": "2025108",
+        "result": [
+          "01",
+          "09",
+          "14",
+          "17",
+          "22",
+          "33",
+          "07"
+        ],
+        "date": "2025-09-18"
+      }
+    ],
+    "type": "ssq"
+  }
+}

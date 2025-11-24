@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 模型文件（通常很大，不提交）
+*.h5
+*.weights.h5
+*.pkl
+*.npz
+
+# 日志文件
+*.log
+api_requests.log
+
+# 数据文件（可选，如果数据很大可以不提交）
+# ssq_history.csv
+# processed_data*.npz
+
+# 训练历史
+training_history*.csv
+
+# 其他
+.DS_Store
+*.tmp
+=2.10.0
+
