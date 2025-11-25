@@ -8,8 +8,8 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization, Input, Attention, MultiHeadAttention, LayerNormalization, Add
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, Callback
+from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization, Input, Attention, MultiHeadAttention, LayerNormalization, Add, Activation
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, Callback, LearningRateScheduler
 from tensorflow.keras import backend as K
 import pickle
 import os
@@ -20,16 +20,73 @@ from sklearn.preprocessing import MinMaxScaler
 
 def focal_loss(gamma=2.0, alpha=0.25):
     """
-    Focal Loss用于处理类别不平衡问题
+    Focal Loss用于处理类别不平衡问题（适配sparse categorical）
     """
     def focal_loss_fixed(y_true, y_pred):
         epsilon = K.epsilon()
         y_pred = K.clip(y_pred, epsilon, 1. - epsilon)
-        alpha_t = y_true * alpha + (K.ones_like(y_true) - y_true) * (1 - alpha)
-        p_t = y_true * y_pred + (K.ones_like(y_true) - y_true) * (K.ones_like(y_true) - y_pred)
-        focal_loss = - alpha_t * K.pow((K.ones_like(y_true) - p_t), gamma) * K.log(p_t)
+        
+        # 将sparse categorical转换为one-hot
+        y_true_one_hot = K.one_hot(K.cast(y_true, 'int32'), K.int_shape(y_pred)[-1])
+        y_true_one_hot = K.cast(y_true_one_hot, K.floatx())
+        
+        # 计算p_t（预测概率）
+        p_t = K.sum(y_true_one_hot * y_pred, axis=-1)
+        
+        # 计算alpha_t
+        alpha_t = y_true_one_hot * alpha + (1.0 - y_true_one_hot) * (1 - alpha)
+        alpha_t = K.sum(alpha_t, axis=-1)
+        
+        # Focal Loss
+        focal_loss = -alpha_t * K.pow(1.0 - p_t, gamma) * K.log(p_t + epsilon)
         return K.mean(focal_loss)
     return focal_loss_fixed
+
+
+def label_smoothing_crossentropy(smoothing=0.1):
+    """
+    标签平滑交叉熵损失
+    有助于防止过拟合，提高泛化能力
+    """
+    def loss_fn(y_true, y_pred):
+        num_classes = K.int_shape(y_pred)[-1]
+        y_true_smooth = K.one_hot(K.cast(y_true, 'int32'), num_classes)
+        y_true_smooth = y_true_smooth * (1.0 - smoothing) + smoothing / num_classes
+        return K.categorical_crossentropy(y_true_smooth, y_pred)
+    return loss_fn
+
+
+def top_k_loss(k=5):
+    """
+    Top-K损失函数：只要预测在Top-K中就算对
+    更适合彩票预测这种场景
+    """
+    def loss_fn(y_true, y_pred):
+        # 获取Top-K预测
+        top_k_values, top_k_indices = tf.nn.top_k(y_pred, k=k)
+        # 检查真实标签是否在Top-K中
+        y_true_expanded = K.expand_dims(K.cast(y_true, 'int32'), axis=-1)
+        in_top_k = tf.reduce_any(tf.equal(top_k_indices, y_true_expanded), axis=-1)
+        # 如果不在Top-K中，使用标准交叉熵；如果在，使用较小的损失
+        standard_loss = K.sparse_categorical_crossentropy(y_true, y_pred)
+        return tf.where(in_top_k, standard_loss * 0.1, standard_loss)
+    return loss_fn
+
+
+def swish_activation(x):
+    """
+    Swish激活函数：x * sigmoid(x)
+    在某些任务上比ReLU表现更好
+    """
+    return x * K.sigmoid(x)
+
+
+def gelu_activation(x):
+    """
+    GELU激活函数：Gaussian Error Linear Unit
+    在Transformer等模型中表现优异
+    """
+    return 0.5 * x * (1 + tf.math.tanh(tf.sqrt(2 / np.pi) * (x + 0.044715 * tf.pow(x, 3))))
 
 
 class MeanTeacherCallback(Callback):
@@ -145,112 +202,203 @@ class SSQLSTMModel50:
     
     def build_model(self, input_shape, use_classification=True):
         """
-        构建LSTM模型（使用50期数据）
+        构建优化的LSTM模型（使用50期数据）
+        优化点：
+        1. 更深的网络结构（4层LSTM）
+        2. 多层注意力机制
+        3. 更多残差连接
+        4. 改进的激活函数和正则化
+        5. 更大的模型容量
         """
         if use_classification:
-            # 改进版本：添加注意力机制和更好的架构
+            # 优化版本：更深的网络和更好的架构
             inputs = Input(shape=input_shape)
             
-            # 第一层LSTM：提取基础特征
-            lstm1 = LSTM(256, return_sequences=True, name='lstm1')(inputs)
+            # ========== LSTM特征提取层 ==========
+            # 第一层LSTM：提取基础特征（增加容量）
+            lstm1 = LSTM(384, return_sequences=True, name='lstm1')(inputs)
             lstm1_norm = BatchNormalization(name='lstm1_norm')(lstm1)
-            lstm1_drop = Dropout(0.3, name='lstm1_drop')(lstm1_norm)
+            lstm1_drop = Dropout(0.25, name='lstm1_drop')(lstm1_norm)
             
             # 第二层LSTM：提取更深层特征
-            lstm2 = LSTM(256, return_sequences=True, name='lstm2')(lstm1_drop)
+            lstm2 = LSTM(384, return_sequences=True, name='lstm2')(lstm1_drop)
             lstm2_norm = BatchNormalization(name='lstm2_norm')(lstm2)
-            lstm2_drop = Dropout(0.3, name='lstm2_drop')(lstm2_norm)
+            lstm2_drop = Dropout(0.25, name='lstm2_drop')(lstm2_norm)
             
-            # 残差连接（如果维度匹配）
+            # 残差连接1：连接第一层和第二层
             if lstm1_drop.shape[-1] == lstm2_drop.shape[-1]:
-                lstm2_drop = Add(name='lstm_residual')([lstm1_drop, lstm2_drop])
+                lstm2_drop = Add(name='lstm_residual1')([lstm1_drop, lstm2_drop])
             
             # 第三层LSTM：进一步提取特征
-            lstm3 = LSTM(128, return_sequences=True, name='lstm3')(lstm2_drop)
+            lstm3 = LSTM(256, return_sequences=True, name='lstm3')(lstm2_drop)
             lstm3_norm = BatchNormalization(name='lstm3_norm')(lstm3)
-            lstm3_drop = Dropout(0.3, name='lstm3_drop')(lstm3_norm)
+            lstm3_drop = Dropout(0.25, name='lstm3_drop')(lstm3_norm)
             
-            # 添加注意力机制：让模型关注重要的时间步
-            # 使用自注意力机制（query, key, value都使用lstm3_drop）
-            attention = MultiHeadAttention(num_heads=4, key_dim=64, name='attention')(lstm3_drop, lstm3_drop, lstm3_drop)
-            attention_norm = LayerNormalization(name='attention_norm')(attention)
-            attention_drop = Dropout(0.2, name='attention_drop')(attention_norm)
+            # 第四层LSTM：高级特征提取
+            lstm4 = LSTM(256, return_sequences=True, name='lstm4')(lstm3_drop)
+            lstm4_norm = BatchNormalization(name='lstm4_norm')(lstm4)
+            lstm4_drop = Dropout(0.25, name='lstm4_drop')(lstm4_norm)
             
-            # 最后一层LSTM：汇总信息
-            x = LSTM(128, return_sequences=False, name='lstm_final')(attention_drop)
+            # 残差连接2：连接第三层和第四层
+            if lstm3_drop.shape[-1] == lstm4_drop.shape[-1]:
+                lstm4_drop = Add(name='lstm_residual2')([lstm3_drop, lstm4_drop])
+            
+            # ========== 注意力机制层 ==========
+            # 第一层注意力：关注短期模式
+            attention1 = MultiHeadAttention(num_heads=8, key_dim=64, name='attention1')(lstm4_drop, lstm4_drop, lstm4_drop)
+            attention1_norm = LayerNormalization(name='attention1_norm')(attention1)
+            attention1_drop = Dropout(0.2, name='attention1_drop')(attention1_norm)
+            
+            # 残差连接：注意力层
+            if lstm4_drop.shape[-1] == attention1_drop.shape[-1]:
+                attention1_drop = Add(name='attention_residual1')([lstm4_drop, attention1_drop])
+            
+            # 第二层注意力：关注长期依赖
+            attention2 = MultiHeadAttention(num_heads=8, key_dim=64, name='attention2')(attention1_drop, attention1_drop, attention1_drop)
+            attention2_norm = LayerNormalization(name='attention2_norm')(attention2)
+            attention2_drop = Dropout(0.2, name='attention2_drop')(attention2_norm)
+            
+            # 残差连接：第二层注意力
+            if attention1_drop.shape[-1] == attention2_drop.shape[-1]:
+                attention2_drop = Add(name='attention_residual2')([attention1_drop, attention2_drop])
+            
+            # ========== 最终LSTM层 ==========
+            # 最后一层LSTM：汇总所有信息
+            x = LSTM(256, return_sequences=False, name='lstm_final')(attention2_drop)
             x = BatchNormalization(name='final_norm')(x)
             x = Dropout(0.3, name='final_drop')(x)
             
-            # 共享的全连接层（增加容量，使用更好的激活函数）
-            shared = Dense(512, activation='relu', name='shared_dense1')(x)
+            # ========== 共享特征层 ==========
+            # 共享的全连接层（增加容量和深度，使用改进的激活函数）
+            use_swish = True  # 使用Swish激活函数（可选：True/False，False则使用ReLU）
+            
+            if use_swish:
+                shared = Dense(768, name='shared_dense1')(x)
+                shared = Activation(swish_activation, name='shared_act1')(shared)
+            else:
+                shared = Dense(768, activation='relu', name='shared_dense1')(x)
             shared = BatchNormalization(name='shared_norm1')(shared)
             shared = Dropout(0.3, name='shared_drop1')(shared)
             
-            shared = Dense(256, activation='relu', name='shared_dense2')(shared)
+            if use_swish:
+                shared = Dense(512, name='shared_dense2')(shared)
+                shared = Activation(swish_activation, name='shared_act2')(shared)
+            else:
+                shared = Dense(512, activation='relu', name='shared_dense2')(shared)
             shared = BatchNormalization(name='shared_norm2')(shared)
             shared = Dropout(0.3, name='shared_drop2')(shared)
             
-            shared = Dense(128, activation='relu', name='shared_dense3')(shared)
+            if use_swish:
+                shared = Dense(256, name='shared_dense3')(shared)
+                shared = Activation(swish_activation, name='shared_act3')(shared)
+            else:
+                shared = Dense(256, activation='relu', name='shared_dense3')(shared)
             shared = BatchNormalization(name='shared_norm3')(shared)
-            shared = Dropout(0.2, name='shared_drop3')(shared)
+            shared = Dropout(0.25, name='shared_drop3')(shared)
             
+            if use_swish:
+                shared = Dense(128, name='shared_dense4')(shared)
+                shared = Activation(swish_activation, name='shared_act4')(shared)
+            else:
+                shared = Dense(128, activation='relu', name='shared_dense4')(shared)
+            shared = BatchNormalization(name='shared_norm4')(shared)
+            shared = Dropout(0.2, name='shared_drop4')(shared)
+            
+            # ========== 红球输出层 ==========
             # 红球输出：6个位置，每个位置33个类别（1-33）
             # 使用更深的网络和更好的正则化
             red_outputs = []
             for i in range(6):
-                red_dense = Dense(256, activation='relu', name=f'red_dense1_{i}')(shared)
+                red_dense = Dense(384, activation='relu', name=f'red_dense1_{i}')(shared)
                 red_dense = BatchNormalization(name=f'red_norm1_{i}')(red_dense)
                 red_dense = Dropout(0.3, name=f'red_drop1_{i}')(red_dense)
                 
-                red_dense2 = Dense(128, activation='relu', name=f'red_dense2_{i}')(red_dense)
+                red_dense2 = Dense(256, activation='relu', name=f'red_dense2_{i}')(red_dense)
                 red_dense2 = BatchNormalization(name=f'red_norm2_{i}')(red_dense2)
-                red_dense2 = Dropout(0.3, name=f'red_drop2_{i}')(red_dense2)
+                red_dense2 = Dropout(0.25, name=f'red_drop2_{i}')(red_dense2)
                 
-                red_dense3 = Dense(64, activation='relu', name=f'red_dense3_{i}')(red_dense2)
+                red_dense3 = Dense(128, activation='relu', name=f'red_dense3_{i}')(red_dense2)
+                red_dense3 = BatchNormalization(name=f'red_norm3_{i}')(red_dense3)
                 red_dense3 = Dropout(0.2, name=f'red_drop3_{i}')(red_dense3)
                 
-                red_output = Dense(33, activation='softmax', name=f'red_ball_{i}')(red_dense3)
+                red_dense4 = Dense(64, activation='relu', name=f'red_dense4_{i}')(red_dense3)
+                red_dense4 = Dropout(0.15, name=f'red_drop4_{i}')(red_dense4)
+                
+                red_output = Dense(33, activation='softmax', name=f'red_ball_{i}')(red_dense4)
                 red_outputs.append(red_output)
             
+            # ========== 蓝球输出层 ==========
             # 蓝球输出：分类（16个类别，1-16）
-            blue_dense = Dense(128, activation='relu', name='blue_dense1')(shared)
+            blue_dense = Dense(256, activation='relu', name='blue_dense1')(shared)
             blue_dense = BatchNormalization(name='blue_norm1')(blue_dense)
             blue_dense = Dropout(0.3, name='blue_drop1')(blue_dense)
             
-            blue_dense2 = Dense(64, activation='relu', name='blue_dense2')(blue_dense)
+            blue_dense2 = Dense(128, activation='relu', name='blue_dense2')(blue_dense)
             blue_dense2 = BatchNormalization(name='blue_norm2')(blue_dense2)
-            blue_dense2 = Dropout(0.3, name='blue_drop2')(blue_dense2)
+            blue_dense2 = Dropout(0.25, name='blue_drop2')(blue_dense2)
             
-            blue_dense3 = Dense(32, activation='relu', name='blue_dense3')(blue_dense2)
+            blue_dense3 = Dense(64, activation='relu', name='blue_dense3')(blue_dense2)
+            blue_dense3 = BatchNormalization(name='blue_norm3')(blue_dense3)
             blue_dense3 = Dropout(0.2, name='blue_drop3')(blue_dense3)
             
-            blue_output = Dense(16, activation='softmax', name='blue_ball')(blue_dense3)
+            blue_dense4 = Dense(32, activation='relu', name='blue_dense4')(blue_dense3)
+            blue_dense4 = Dropout(0.15, name='blue_drop4')(blue_dense4)
+            
+            blue_output = Dense(16, activation='softmax', name='blue_ball')(blue_dense4)
             
             # 组合所有输出
             outputs = red_outputs + [blue_output]
             
             model = Model(inputs=inputs, outputs=outputs)
             
-            # 定义损失函数：使用Focal Loss处理类别不平衡，提高难样本的学习
-            # 对于彩票预测这种类别不平衡问题，Focal Loss更有效
+            # ========== 损失函数和优化器 ==========
             losses = {}
             loss_weights = {}
             
-            # 使用标准交叉熵（Focal Loss在某些情况下可能不稳定，先用标准损失）
-            # 如果需要可以切换为focal_loss(gamma=2.0, alpha=0.25)
-            for i in range(6):
-                losses[f'red_ball_{i}'] = 'sparse_categorical_crossentropy'
-                loss_weights[f'red_ball_{i}'] = 1.0
-            losses['blue_ball'] = 'sparse_categorical_crossentropy'
-            loss_weights['blue_ball'] = 1.2  # 稍微提高蓝球权重
+            # 使用改进的损失函数组合
+            # 方案1：Focal Loss + 标签平滑（处理类别不平衡和过拟合）
+            # 方案2：Top-K损失（更适合彩票预测场景）
+            # 方案3：标准交叉熵（作为baseline）
             
-            # 编译模型（使用自适应学习率）
+            # 当前使用：Focal Loss（处理类别不平衡）+ 标签平滑（防止过拟合）
+            use_focal_loss = True  # 是否使用Focal Loss
+            use_label_smoothing = True  # 是否使用标签平滑
+            smoothing_rate = 0.1  # 标签平滑率
+            
+            if use_focal_loss:
+                # 使用Focal Loss处理类别不平衡
+                focal_loss_fn = focal_loss(gamma=2.0, alpha=0.25)
+                for i in range(6):
+                    losses[f'red_ball_{i}'] = focal_loss_fn
+                    loss_weights[f'red_ball_{i}'] = 1.0
+                losses['blue_ball'] = focal_loss_fn
+                loss_weights['blue_ball'] = 1.5  # 进一步提高蓝球权重
+            elif use_label_smoothing:
+                # 使用标签平滑交叉熵
+                label_smooth_fn = label_smoothing_crossentropy(smoothing=smoothing_rate)
+                for i in range(6):
+                    losses[f'red_ball_{i}'] = label_smooth_fn
+                    loss_weights[f'red_ball_{i}'] = 1.0
+                losses['blue_ball'] = label_smooth_fn
+                loss_weights['blue_ball'] = 1.5
+            else:
+                # 标准交叉熵
+                for i in range(6):
+                    losses[f'red_ball_{i}'] = 'sparse_categorical_crossentropy'
+                    loss_weights[f'red_ball_{i}'] = 1.0
+                losses['blue_ball'] = 'sparse_categorical_crossentropy'
+                loss_weights['blue_ball'] = 1.5
+            
+            # 编译模型（使用优化的Adam优化器 + 学习率调度）
+            # 使用余弦退火学习率
+            initial_lr = 0.001
             model.compile(
                 optimizer=keras.optimizers.Adam(
-                    learning_rate=0.001,  # 初始学习率稍高
+                    learning_rate=initial_lr,
                     beta_1=0.9,
                     beta_2=0.999,
-                    epsilon=1e-7
+                    epsilon=1e-7,
+                    amsgrad=True  # 使用AMSGrad变体，更稳定
                 ),
                 loss=losses,
                 loss_weights=loss_weights,
@@ -286,11 +434,22 @@ class SSQLSTMModel50:
         
         return model
     
-    def train(self, epochs=100, batch_size=32, validation_split=0.2):
+    def train(self, epochs=200, batch_size=24, validation_split=0.2):
         """
-        训练模型（使用50期数据）
+        训练优化的LSTM模型（使用50期数据）
+        优化点：
+        1. 增加训练轮数（200轮）
+        2. 优化批次大小（24，更好的梯度估计）
+        3. 改进回调函数策略
         """
-        print("开始训练LSTM模型（使用50期数据）...")
+        print("开始训练优化的LSTM模型（使用50期数据）...")
+        print("=" * 60)
+        print("优化配置:")
+        print(f"  - 训练轮数: {epochs}")
+        print(f"  - 批次大小: {batch_size}")
+        print(f"  - 验证集比例: {validation_split}")
+        print(f"  - 平均老师策略: {'启用' if self.use_mean_teacher else '未启用'}")
+        print("=" * 60)
         
         # 加载数据
         X_train, X_test, y_train, y_test, seq_length = self.load_data()
@@ -300,33 +459,55 @@ class SSQLSTMModel50:
         self.model = self.build_model(input_shape, use_classification=self.use_classification)
         self.teacher_model = None
         
-        print("模型结构:")
+        print("\n模型结构:")
         self.model.summary()
         
-        # 回调函数（优化训练策略）
+        # 优化的回调函数
+        # 1. 余弦退火学习率调度（更平滑的学习率衰减）
+        def cosine_annealing_schedule(epoch, lr):
+            """余弦退火学习率调度"""
+            initial_lr = 0.001
+            min_lr = 1e-7
+            max_epochs = epochs
+            if epoch < max_epochs * 0.1:  # 前10%保持初始学习率
+                return initial_lr
+            else:
+                # 余弦退火
+                progress = (epoch - max_epochs * 0.1) / (max_epochs * 0.9)
+                return min_lr + (initial_lr - min_lr) * 0.5 * (1 + np.cos(np.pi * progress))
+        
         callbacks = [
             EarlyStopping(
                 monitor='val_loss',
-                patience=40,  # 增加patience，给模型更多训练机会
+                patience=60,  # 进一步增加patience，给模型更多训练时间
                 restore_best_weights=True,
                 verbose=1,
-                min_delta=0.0001  # 设置最小改进阈值
+                min_delta=0.00001,  # 更小的改进阈值
+                mode='min'
             ),
             ModelCheckpoint(
                 self.model_file,
                 monitor='val_loss',
                 save_best_only=True,
                 save_weights_only=True,
+                verbose=1,
+                mode='min'
+            ),
+            # 余弦退火学习率调度
+            LearningRateScheduler(
+                cosine_annealing_schedule,
                 verbose=1
             ),
+            # 备用：基于验证损失的学习率衰减
             ReduceLROnPlateau(
                 monitor='val_loss',
-                factor=0.5,  # 适中的学习率衰减
-                patience=15,  # 增加patience，避免过早降低学习率
-                min_lr=1e-7,  # 更小的最小学习率
+                factor=0.5,  # 学习率衰减因子
+                patience=25,  # 增加patience
+                min_lr=1e-8,
                 verbose=1,
                 mode='min',
-                cooldown=5  # 学习率降低后的冷却期
+                cooldown=10,
+                min_delta=0.0001
             )
         ]
 
