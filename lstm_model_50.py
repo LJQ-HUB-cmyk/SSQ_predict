@@ -629,12 +629,20 @@ class SSQLSTMModel50:
         return self.model
     
     def _prepare_features_from_csv(self, df):
-        """从CSV数据准备特征"""
+        """
+        从CSV数据准备增强的特征（与data_processor_50.py保持一致）
+        包括：基础特征 + 频率特征 + 趋势特征 + 相关性特征
+        """
         red_cols = ['红球1', '红球2', '红球3', '红球4', '红球5', '红球6']
         blue_col = '蓝球'
         
         red_balls = df[red_cols].astype(int).values
         blue_balls = df[blue_col].astype(int).values
+        
+        # 计算历史频率（用于频率特征）
+        number_frequency = {}  # 记录每个号码的出现频率
+        for num in range(1, 34):
+            number_frequency[num] = []
         
         features = []
         for i in range(len(df)):
@@ -642,32 +650,142 @@ class SSQLSTMModel50:
             blue = blue_balls[i]
             
             red_sorted = sorted(red)
+            
+            # ========== 基础统计特征 ==========
             red_sum = sum(red_sorted)
             red_mean = np.mean(red_sorted)
             red_std = np.std(red_sorted)
             red_max = max(red_sorted)
             red_min = min(red_sorted)
             red_range = red_max - red_min
+            red_median = np.median(red_sorted)
             red_odd_count = sum(1 for x in red_sorted if x % 2 == 1)
             red_even_count = 6 - red_odd_count
             red_small_count = sum(1 for x in red_sorted if x <= 17)
             red_large_count = 6 - red_small_count
             sum_zone = red_sum // 50
             
+            # ========== 频率特征（最近N期的出现频率）==========
+            # 计算每个号码在最近10期的出现频率
+            freq_window = min(10, i)  # 使用最近10期，如果数据不足则用全部
+            if freq_window > 0:
+                recent_reds = red_balls[max(0, i-freq_window):i].flatten()
+                number_counts = {}
+                for num in range(1, 34):
+                    number_counts[num] = np.sum(recent_reds == num)
+                # 当前期号码的频率特征
+                current_freq = [number_counts[num] for num in red_sorted]
+                avg_freq = np.mean(current_freq)
+                max_freq = max(current_freq) if current_freq else 0
+                min_freq = min(current_freq) if current_freq else 0
+            else:
+                current_freq = [0] * 6
+                avg_freq = 0
+                max_freq = 0
+                min_freq = 0
+            
+            # ========== 趋势特征 ==========
+            # 计算号码的移动平均和趋势
+            if i >= 3:
+                # 3期移动平均
+                recent_reds = red_balls[i-3:i]
+                ma3_sum = np.mean([np.sum(r) for r in recent_reds])
+                ma3_mean = np.mean([np.mean(r) for r in recent_reds])
+                trend_sum = red_sum - ma3_sum  # 和值趋势
+                trend_mean = red_mean - ma3_mean  # 均值趋势
+            else:
+                ma3_sum = red_sum
+                ma3_mean = red_mean
+                trend_sum = 0
+                trend_mean = 0
+            
+            if i >= 5:
+                # 5期移动平均
+                recent_reds = red_balls[i-5:i]
+                ma5_sum = np.mean([np.sum(r) for r in recent_reds])
+                ma5_mean = np.mean([np.mean(r) for r in recent_reds])
+            else:
+                ma5_sum = red_sum
+                ma5_mean = red_mean
+            
+            # ========== 相关性特征 ==========
+            # 号码之间的间隔
+            intervals = [red_sorted[j+1] - red_sorted[j] for j in range(5)]
+            avg_interval = np.mean(intervals)
+            max_interval = max(intervals)
+            min_interval = min(intervals)
+            interval_std = np.std(intervals)
+            
+            # 连号数量（相邻号码差为1）
+            consecutive_count = sum(1 for interval in intervals if interval == 1)
+            
+            # 号码分布特征（三个区间：1-11, 12-22, 23-33）
+            zone1_count = sum(1 for x in red_sorted if 1 <= x <= 11)
+            zone2_count = sum(1 for x in red_sorted if 12 <= x <= 22)
+            zone3_count = sum(1 for x in red_sorted if 23 <= x <= 33)
+            
+            # 号码跨度特征（最大最小值的差）
+            span_ratio = red_range / 33.0  # 跨度比例
+            
+            # ========== 组合特征 ==========
+            # 红球与蓝球的和
+            total_sum = red_sum + blue
+            
+            # 红球与蓝球的差值
+            red_blue_diff = abs(red_mean - blue)
+            
+            # 号码的方差
+            red_variance = np.var(red_sorted)
+            
+            # ========== 构建特征向量 ==========
             feature_vector = [
+                # 基础特征（7个号码）
                 *red_sorted,
                 blue,
+                # 基础统计特征（12个）
                 red_sum,
                 red_mean,
                 red_std,
+                red_median,
                 red_range,
                 red_odd_count,
                 red_even_count,
                 red_small_count,
                 red_large_count,
-                sum_zone
+                sum_zone,
+                red_variance,
+                # 频率特征（4个）
+                avg_freq,
+                max_freq,
+                min_freq,
+                np.std(current_freq) if current_freq else 0,
+                # 趋势特征（6个）
+                ma3_sum,
+                ma3_mean,
+                ma5_sum,
+                ma5_mean,
+                trend_sum,
+                trend_mean,
+                # 相关性特征（8个）
+                avg_interval,
+                max_interval,
+                min_interval,
+                interval_std,
+                consecutive_count,
+                zone1_count,
+                zone2_count,
+                zone3_count,
+                span_ratio,
+                # 组合特征（3个）
+                total_sum,
+                red_blue_diff,
             ]
+            
             features.append(feature_vector)
+            
+            # 更新频率统计
+            for num in red_sorted:
+                number_frequency[num].append(i)
         
         return np.array(features)
     
