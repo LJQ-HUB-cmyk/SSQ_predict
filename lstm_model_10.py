@@ -898,62 +898,19 @@ class SSQLSTMModel10:
                     print(f"{idx+1}({prob:.3f}) ", end="")
                 print()
             
-            # ========== 位置对应选择策略 ==========
-            def position_based_selection(predictions):
-                """
-                位置对应选择策略：
-                1. 每个位置选择该位置概率最高的号码
-                2. 如果出现重复，选择该位置概率次高的号码
-                3. 确保最终6个号码不重复
-                """
-                prob_dists = [predictions[i][0].copy() for i in range(6)]
-                red_balls = []
-                
-                # 按位置顺序选择
-                for pos in range(6):
-                    prob_dist = prob_dists[pos]
-                    
-                    # 获取该位置概率从高到低的排序
-                    sorted_indices = np.argsort(prob_dist)[::-1]
-                    
-                    # 选择该位置概率最高且未选中的号码
-                    selected = False
-                    for idx in sorted_indices:
-                        ball = idx + 1  # 转换为1-33
-                        if ball not in red_balls:
-                            red_balls.append(ball)
-                            selected = True
-                            break
-                    
-                    # 如果所有号码都被选过了（理论上不可能），选择概率最高的
-                    if not selected:
-                        best_ball = np.argmax(prob_dist) + 1
-                        red_balls.append(best_ball)
-                
-                # 确保有6个不重复的号码
-                red_balls = sorted(list(set(red_balls)))
-                
-                # 如果不足6个，从所有位置的平均概率中选择补充
-                if len(red_balls) < 6:
-                    # 计算每个号码在所有位置的平均概率
-                    avg_probs = np.mean(prob_dists, axis=0)
-                    
-                    # 从高到低选择未选中的号码
-                    sorted_by_avg = np.argsort(avg_probs)[::-1]
-                    for idx in sorted_by_avg:
-                        ball = idx + 1
-                        if ball not in red_balls:
-                            red_balls.append(ball)
-                            if len(red_balls) >= 6:
-                                break
-                
-                return sorted(red_balls[:6])
+            # ========== 直接根据训练结果选择（无限制）==========
+            # 每个位置直接选择概率最高的号码，不处理重复
+            print("\n正在生成预测结果（完全根据训练结果，每个位置选择概率最高的号码）...")
+            red_balls = []
+            for i in range(6):
+                prob_dist = predictions[i][0]
+                # 直接选择概率最高的号码
+                best_idx = np.argmax(prob_dist)
+                red_balls.append(best_idx + 1)  # 转换为1-33
             
-            # 使用位置对应选择策略
-            print("\n正在生成预测结果（每个位置选择概率最高的号码）...")
-            red_balls = position_based_selection(predictions)
+            red_balls = sorted(red_balls)
             
-            # 蓝球预测：使用改进的策略（避免总是预测同一个号码）
+            # 蓝球预测：直接根据训练结果选择概率最高的号码（无限制）
             blue_prob_dist = predictions[6][0]
             
             print(f"\n蓝球预测信息:")
@@ -964,51 +921,11 @@ class SSQLSTMModel10:
                 print(f"{idx+1}({prob:.3f}) ", end="")
             print()
             
-            # 检查概率分布
-            max_prob = np.max(blue_prob_dist)
-            entropy = -np.sum(blue_prob_dist * np.log(blue_prob_dist + 1e-10))
-            max_entropy = np.log(16)
-            entropy_ratio = entropy / max_entropy
-            
-            print(f"  概率分布熵: {entropy:.4f} (比例: {entropy_ratio:.2%})")
-            print(f"  最高概率: {max_prob:.4f} ({max_prob*100:.2f}%)")
-            
-            # 改进策略：使用加权采样，避免总是选最高概率
-            # 方法1：如果最高概率太高（>10%），使用Top-K加权采样
-            # 方法2：使用温度缩放，增加随机性
-            use_temperature_sampling = True  # 总是使用温度采样，增加多样性
-            
-            if use_temperature_sampling:
-                # 温度采样：使用温度参数调整概率分布
-                temperature = 1.5  # 温度越高，分布越均匀
-                scaled_probs = np.power(blue_prob_dist, 1.0 / temperature)
-                scaled_probs = scaled_probs / scaled_probs.sum()
-                
-                # 从Top-5中采样（避免选择概率太低的号码）
-                top5_indices_list = top5_indices.tolist()
-                top5_scaled_probs = scaled_probs[top5_indices]
-                top5_scaled_probs = top5_scaled_probs / top5_scaled_probs.sum()
-                
-                if random_seed is not None:
-                    np.random.seed(random_seed)
-                blue_ball = np.random.choice(top5_indices + 1, p=top5_scaled_probs)
-                print(f"  策略: Top-5温度采样 (温度={temperature})")
-            elif entropy_ratio < 0.5 or max_prob > 0.15:
-                # 概率分布过于集中，使用Top-3采样
-                top3_indices = top5_indices[:3]
-                top3_probs = blue_prob_dist[top3_indices]
-                top3_probs = top3_probs / top3_probs.sum()
-                
-                if random_seed is not None:
-                    np.random.seed(random_seed)
-                blue_ball = np.random.choice(top3_indices + 1, p=top3_probs)
-                print(f"  策略: Top-3采样（概率分布过于集中）")
-            else:
-                # 概率分布较分散，使用最高概率
-                blue_ball = np.argmax(blue_prob_dist) + 1
-                print(f"  策略: 最高概率选择")
-            
-            print(f"  最终预测: {blue_ball} (原始概率: {blue_prob_dist[blue_ball-1]:.3f})")
+            # 直接选择概率最高的号码，不使用任何采样策略
+            blue_ball = np.argmax(blue_prob_dist) + 1
+            max_prob = blue_prob_dist[blue_ball - 1]
+            print(f"  策略: 完全根据训练结果，选择概率最高的号码")
+            print(f"  最终预测: {blue_ball} (概率: {max_prob:.4f} ({max_prob*100:.2f}%))")
             
             # 返回单个结果
             return {
